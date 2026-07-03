@@ -1,0 +1,12 @@
+<resources>
+    <!--
+      The app UI is fully Jetpack Compose with a Material 3 dynamic-color theme
+      (see ui/theme). This XML theme only styles the launch window / activity
+      background so there is no flash before Compose draws.
+    -->
+    <style name="Theme.Hangy" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/surface</item>
+        <item name="android:statusBarColor">@color/surface</item>
+        <item name="android:windowLightStatusBar">true</item>
+    </style>
+</resources>

@@ -1,0 +1,225 @@
+package me.kitsu.hangy.ui.common
+
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.inset
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.rememberTextMeasurer
+import me.kitsu.hangy.R
+import me.kitsu.hangy.domain.engine.TimedSample
+import me.kitsu.hangy.domain.model.RepResult
+import me.kitsu.hangy.domain.model.Sample
+import me.kitsu.hangy.domain.model.SessionDetail
+import kotlin.math.max
+
+/**
+ * Plots a whole session's raw weight stream on a [Canvas], with the target band drawn horizontally
+ * and each rep's tension window shaded vertically. The stream is min/max-decimated to the visible
+ * width so a multi-thousand-point session renders cheaply.
+ *
+ * When [interactive] is true the time axis can be pinch-zoomed and dragged; otherwise the whole
+ * session is shown statically (used for the mini overviews in cards and the post-session summary).
+ */
+@Composable
+fun SessionTimelineChart(detail: SessionDetail, modifier: Modifier = Modifier, interactive: Boolean = false, showAxes: Boolean = true) {
+    val lineColor = MaterialTheme.colorScheme.primary
+    val bandColor = MaterialTheme.colorScheme.secondaryContainer
+    val tensionColor = MaterialTheme.colorScheme.tertiary.copy(alpha = TENSION_ALPHA)
+    val gridColor = MaterialTheme.colorScheme.outlineVariant
+    val labelColor = MaterialTheme.colorScheme.onSurfaceVariant
+    val labelStyle = MaterialTheme.typography.labelSmall
+    val kgUnit = stringResource(R.string.target_unit_kg)
+    val measurer = rememberTextMeasurer()
+
+    val samples = detail.samples
+    val firstT = samples.firstOrNull()?.tOffsetMs ?: 0L
+    val lastT = samples.lastOrNull()?.tOffsetMs ?: 0L
+    val totalSpan = (lastT - firstT).coerceAtLeast(1L).toFloat()
+
+    var scale by remember(detail.session.id) { mutableFloatStateOf(1f) }
+    var startT by remember(detail.session.id) { mutableFloatStateOf(firstT.toFloat()) }
+
+    val buckets = if (interactive) INTERACTIVE_BUCKETS else MINI_BUCKETS
+    val visibleSpan = totalSpan / scale
+    val maxStart = (totalSpan - visibleSpan).coerceAtLeast(0f)
+    val clampedStart = startT.coerceIn(firstT.toFloat(), firstT + maxStart)
+    val windowStart = clampedStart.toLong()
+    val windowEnd = (clampedStart + visibleSpan).toLong()
+
+    val linePath = remember { Path() }
+    val points = downsampleWindow(samples, windowStart, windowEnd, buckets)
+
+    val bandLow = detail.session.targetLowKg
+    val bandHigh = detail.session.targetHighKg
+    val reps = detail.reps
+
+    val gestureModifier = if (interactive && totalSpan > 1f) {
+        Modifier.pointerInput(detail.session.id) {
+            detectTransformGestures { centroid, pan, zoom, _ ->
+                // The plot occupies the canvas minus the y-axis gutter, so map gestures into it.
+                val leftGutter = if (showAxes) Y_AXIS_GUTTER.toPx() else 0f
+                val w = (size.width - leftGutter).coerceAtLeast(1f)
+                val cx = (centroid.x - leftGutter).coerceIn(0f, w)
+                val oldVisible = totalSpan / scale
+                val curStart = startT.coerceIn(firstT.toFloat(), firstT + (totalSpan - oldVisible).coerceAtLeast(0f))
+                val newScale = (scale * zoom).coerceIn(1f, MAX_ZOOM)
+                val newVisible = totalSpan / newScale
+                // Keep the time under the pinch centroid fixed, then apply the drag.
+                val centroidT = curStart + (cx / w) * oldVisible
+                val ns = centroidT - (cx / w) * newVisible - (pan.x / w) * newVisible
+                scale = newScale
+                startT = ns.coerceIn(firstT.toFloat(), firstT + (totalSpan - newVisible).coerceAtLeast(0f))
+            }
+        }
+    } else {
+        Modifier
+    }
+
+    Canvas(modifier = modifier.then(gestureModifier)) {
+        var dMin = 0.0
+        var dMax = 0.0
+        for (p in points) {
+            if (p.weightKg < dMin) dMin = p.weightKg
+            if (p.weightKg > dMax) dMax = p.weightKg
+        }
+        val top = max(max(dMax, bandHigh), MIN_Y_AXIS_KG) * Y_HEADROOM
+        val bottom = if (dMin < 0) dMin * Y_HEADROOM else 0.0
+        val range = (top - bottom).coerceAtLeast(1.0)
+
+        val leftGutter = if (showAxes) Y_AXIS_GUTTER.toPx() else 0f
+        val bottomGutter = if (showAxes) X_AXIS_GUTTER.toPx() else 0f
+        if (showAxes) {
+            drawWeightAxis(measurer, labelStyle, gridColor, labelColor, kgUnit, bottom, top, leftGutter, bottomGutter)
+            drawTimeAxis(measurer, labelStyle, gridColor, labelColor, windowStart, windowEnd, leftGutter, bottomGutter)
+        } else {
+            drawGridLines(gridColor)
+        }
+        inset(left = leftGutter, top = 0f, right = 0f, bottom = bottomGutter) {
+            drawHorizontalBand(bandLow, bandHigh, bottom, range, bandColor)
+            drawTensionSpans(reps, windowStart, visibleSpan, tensionColor)
+            drawZeroBaseline(bottom, range, gridColor)
+            drawTrace(linePath, points, windowStart, visibleSpan, bottom, range, lineColor)
+        }
+    }
+}
+
+private const val MIN_Y_AXIS_KG = 10.0
+private const val Y_HEADROOM = 1.15
+private const val GRID_LINES = 4
+private const val LINE_WIDTH = 3f
+private const val TENSION_ALPHA = 0.18f
+private const val MAX_ZOOM = 40f
+private const val MINI_BUCKETS = 120
+private const val INTERACTIVE_BUCKETS = 260
+
+/**
+ * Per-bucket min/max decimation of [samples] within `[startMs, endMs]`. Emitting both the min and
+ * the max of each time bucket preserves the trace's envelope (peaks and valleys) that plain
+ * every-Nth sampling would drop.
+ */
+internal fun downsampleWindow(samples: List<Sample>, startMs: Long, endMs: Long, buckets: Int): List<TimedSample> {
+    if (samples.isEmpty() || buckets <= 0) return emptyList()
+    val visible = samples.filter { it.tOffsetMs in startMs..endMs }
+    if (visible.size <= buckets * 2) return visible.map { TimedSample(it.tOffsetMs, it.weightKg) }
+
+    val span = (endMs - startMs).coerceAtLeast(1L)
+    val out = ArrayList<TimedSample>(buckets * 2)
+    var bucket = -1
+    var lo: Sample? = null
+    var hi: Sample? = null
+
+    fun flush() {
+        val l = lo ?: return
+        val h = hi ?: return
+        val a = if (l.tOffsetMs <= h.tOffsetMs) l else h
+        val b = if (l.tOffsetMs <= h.tOffsetMs) h else l
+        out.add(TimedSample(a.tOffsetMs, a.weightKg))
+        if (b !== a) out.add(TimedSample(b.tOffsetMs, b.weightKg))
+    }
+
+    for (s in visible) {
+        val b = (((s.tOffsetMs - startMs) * buckets) / span).toInt().coerceIn(0, buckets - 1)
+        if (b != bucket) {
+            flush()
+            lo = null
+            hi = null
+            bucket = b
+        }
+        val curLo = lo
+        if (curLo == null || s.weightKg < curLo.weightKg) lo = s
+        val curHi = hi
+        if (curHi == null || s.weightKg > curHi.weightKg) hi = s
+    }
+    flush()
+    return out
+}
+
+private fun DrawScope.yFor(kg: Double, bottom: Double, range: Double): Float =
+    (size.height * (1f - ((kg - bottom) / range).toFloat())).coerceIn(0f, size.height)
+
+private fun DrawScope.xFor(tMs: Long, startMs: Long, visibleSpan: Float): Float =
+    (size.width * (tMs - startMs).toFloat() / visibleSpan.coerceAtLeast(1f)).coerceIn(0f, size.width)
+
+private fun DrawScope.drawGridLines(gridColor: Color) {
+    for (i in 0..GRID_LINES) {
+        val y = size.height * i / GRID_LINES
+        drawLine(gridColor, Offset(0f, y), Offset(size.width, y), strokeWidth = 1f)
+    }
+}
+
+private fun DrawScope.drawZeroBaseline(bottom: Double, range: Double, gridColor: Color) {
+    if (bottom >= 0) return
+    val y = yFor(0.0, bottom, range)
+    drawLine(gridColor, Offset(0f, y), Offset(size.width, y), strokeWidth = 2f)
+}
+
+private fun DrawScope.drawHorizontalBand(low: Double, high: Double, bottom: Double, range: Double, color: Color) {
+    if (high <= 0.0 || high <= low) return
+    val topY = yFor(high, bottom, range)
+    val bottomY = yFor(low, bottom, range)
+    drawRect(color, topLeft = Offset(0f, topY), size = Size(size.width, (bottomY - topY).coerceAtLeast(0f)))
+}
+
+private fun DrawScope.drawTensionSpans(reps: List<RepResult>, startMs: Long, visibleSpan: Float, color: Color) {
+    for (rep in reps) {
+        if (rep.tEndMs > rep.tStartMs) {
+            val x1 = xFor(rep.tStartMs, startMs, visibleSpan)
+            val x2 = xFor(rep.tEndMs, startMs, visibleSpan)
+            val w = x2 - x1
+            if (w > 0f) drawRect(color, topLeft = Offset(x1, 0f), size = Size(w, size.height))
+        }
+    }
+}
+
+private fun DrawScope.drawTrace(
+    path: Path,
+    points: List<TimedSample>,
+    startMs: Long,
+    visibleSpan: Float,
+    bottom: Double,
+    range: Double,
+    color: Color,
+) {
+    if (points.size < 2) return
+    path.rewind()
+    points.forEachIndexed { index, p ->
+        val x = xFor(p.tMs, startMs, visibleSpan)
+        val y = yFor(p.weightKg, bottom, range)
+        if (index == 0) path.moveTo(x, y) else path.lineTo(x, y)
+    }
+    drawPath(path, color = color, style = Stroke(width = LINE_WIDTH))
+}
