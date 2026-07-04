@@ -5,8 +5,7 @@ plugins {
     alias(libs.plugins.ksp)
 }
 
-fun versionCodeOf(version: String): Int =
-    version.removePrefix("v").toIntOrNull() ?: 1
+fun versionCodeOf(version: String): Int = version.removePrefix("v").toIntOrNull() ?: 1
 
 android {
     namespace = "me.kitsu.hangy"
