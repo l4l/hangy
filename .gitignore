@@ -11,3 +11,5 @@ local.properties
 /app/build/
 /build/
 *.hprof
+release.keystore
+*.jks

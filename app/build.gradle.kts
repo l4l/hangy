@@ -5,6 +5,9 @@ plugins {
     alias(libs.plugins.ksp)
 }
 
+fun versionCodeOf(version: String): Int =
+    version.removePrefix("v").toIntOrNull() ?: 1
+
 android {
     namespace = "me.kitsu.hangy"
     compileSdk = 36
@@ -13,11 +16,26 @@ android {
         applicationId = "me.kitsu.hangy"
         minSdk = 31
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0"
+        val version = System.getenv("VERSION_NAME") ?: "1.0"
+        versionName = version
+        versionCode = versionCodeOf(version)
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }
+    }
+
+    val releaseKeystore = rootProject.file("release.keystore")
+
+    signingConfigs {
+        create("release") {
+            if (releaseKeystore.exists()) {
+                storeFile = releaseKeystore
+                storePassword = System.getenv("RELEASE_STORE_PASSWORD")
+                    ?: System.getenv("RELEASE_KEY_PASSWORD")
+                keyAlias = System.getenv("RELEASE_KEY_ALIAS")
+                keyPassword = System.getenv("RELEASE_KEY_PASSWORD")
+            }
+        }
     }
 
     buildTypes {
@@ -27,6 +45,12 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
+            signingConfig =
+                if (releaseKeystore.exists()) {
+                    signingConfigs.getByName("release")
+                } else {
+                    null
+                }
         }
         debug {
             isMinifyEnabled = false
