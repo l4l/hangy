@@ -1,4 +1,4 @@
-package me.kitsu.hangy.ui.measure
+package me.kitsu.hangy.session
 
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow

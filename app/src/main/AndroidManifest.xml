@@ -13,10 +13,16 @@
         tools:targetApi="s" />
 
     <!--
-      Aggressive OEM (Samsung) power management de-prioritises long-running BLE scans, which
-      collapses the live reading rate. Requesting an exemption keeps the scan delivering.
+      The Bluetooth stack clamps a scan to SCAN_MODE_LOW_POWER unless the app's UID importance is
+      at least IMPORTANCE_FOREGROUND_SERVICE, which collapses the live reading rate. ScaleService
+      runs as a connectedDevice foreground service for the length of a session to hold that
+      importance; a granted BLUETOOTH_SCAN satisfies the type's prerequisite permission.
     -->
-    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+
+    <!-- Denying this hides the service's notification; the scan still runs. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <uses-feature
         android:name="android.hardware.bluetooth_le"
@@ -43,6 +49,11 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <service
+            android:name=".session.ScaleService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
     </application>
 
 </manifest>

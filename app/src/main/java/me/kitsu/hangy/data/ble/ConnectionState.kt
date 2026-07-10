@@ -15,4 +15,6 @@ sealed interface ConnectionState {
     data class Error(val message: String) : ConnectionState
 
     val isReceiving: Boolean get() = this is Connected
+
+    val isScanning: Boolean get() = this is Searching || this is Connected || this is SignalLost
 }

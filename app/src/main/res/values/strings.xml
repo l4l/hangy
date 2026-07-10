@@ -20,6 +20,12 @@
     <string name="enable_bluetooth">Enable Bluetooth</string>
     <string name="retry">Retry</string>
 
+    <!-- Foreground service -->
+    <string name="notification_channel_measuring">Measuring</string>
+    <string name="notification_measuring_title">Hangy</string>
+    <string name="notification_measuring_text">Measuring</string>
+    <string name="notification_stop">Stop</string>
+
     <!-- Measure -->
     <string name="current_weight">Current</string>
     <string name="avg_weight">Avg</string>

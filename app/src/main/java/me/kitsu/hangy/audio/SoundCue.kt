@@ -14,14 +14,11 @@ interface SoundCue {
     /** Marks a hang ending or the routine completing. */
     fun end()
 
-    fun release()
-
     companion object {
         val NoOp: SoundCue = object : SoundCue {
             override fun tick() = Unit
             override fun start() = Unit
             override fun end() = Unit
-            override fun release() = Unit
         }
     }
 }
@@ -29,7 +26,8 @@ interface SoundCue {
 /**
  * [SoundCue] backed by [ToneGenerator]. The generator is created lazily and failures are
  * swallowed, since some devices throw when the media stream is unavailable — a missing beep must
- * never crash a training session.
+ * never crash a training session. No `release()`: [lazy] cannot rebuild the generator, so
+ * releasing it would silently mute every later session.
  */
 class ToneGeneratorSoundCue : SoundCue {
 
@@ -48,10 +46,6 @@ class ToneGeneratorSoundCue : SoundCue {
 
     override fun end() {
         runCatching { generator?.startTone(ToneGenerator.TONE_PROP_BEEP2, END_MS) }
-    }
-
-    override fun release() {
-        runCatching { generator?.release() }
     }
 
     private companion object {

@@ -3,8 +3,7 @@ package me.kitsu.hangy.ui.measure
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.net.Uri
-import android.os.PowerManager
+import android.os.Build
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -62,6 +61,7 @@ import me.kitsu.hangy.domain.model.Hand
 import me.kitsu.hangy.domain.model.Routine
 import me.kitsu.hangy.domain.model.SessionDetail
 import me.kitsu.hangy.domain.model.TargetType
+import me.kitsu.hangy.session.MeasureMode
 import me.kitsu.hangy.ui.common.LiveWeightChart
 import me.kitsu.hangy.ui.common.SessionTimelineChart
 import me.kitsu.hangy.ui.common.appContainer
@@ -77,19 +77,18 @@ fun MeasureScreen() {
     val vm: MeasureViewModel = viewModel(
         factory = viewModelFactory {
             MeasureViewModel(
-                scale = container.scaleRepository,
+                controller = container.sessionController,
+                serviceHost = container.serviceHost,
                 routineRepository = container.routineRepository,
-                measurementRepository = container.measurementRepository,
                 settingsRepository = container.settingsRepository,
-                engine = container.routineEngine,
-                sound = container.soundCue,
             )
         },
     )
     val state by vm.uiState.collectAsStateWithLifecycle()
     var showStopConfirm by remember { mutableStateOf(false) }
 
-    DisposableEffect(Unit) { onDispose { vm.disconnect() } }
+    // Nothing disconnects on dispose: the session lives in the service, and tearing the scan down
+    // on every rotation would trip Android's 5-scans-per-30s throttle.
 
     // Keep the screen awake while actively measuring so it never sleeps mid-hang.
     val view = LocalView.current
@@ -119,7 +118,7 @@ fun MeasureScreen() {
                 }
 
                 MeasureMode.IDLE -> {
-                    ConnectionStatusCard(state.connection, onConnect = vm::connect)
+                    ConnectionStatusCard(state.connection, onConnect = vm::connect, onDisconnect = vm::disconnect)
                     RoutinePicker(
                         routines = state.routines,
                         onSelect = vm::selectRoutine,
@@ -132,7 +131,7 @@ fun MeasureScreen() {
                     if (summary != null) {
                         SessionSummaryPanel(summary = summary, onDone = vm::backToSelection)
                     } else {
-                        ConnectionStatusCard(state.connection, onConnect = vm::connect)
+                        ConnectionStatusCard(state.connection, onConnect = vm::connect, onDisconnect = vm::disconnect)
                         RoutinePicker(
                             routines = state.routines,
                             onSelect = vm::selectRoutine,
@@ -142,7 +141,7 @@ fun MeasureScreen() {
                 }
 
                 MeasureMode.CONFIG -> {
-                    ConnectionStatusCard(state.connection, onConnect = vm::connect)
+                    ConnectionStatusCard(state.connection, onConnect = vm::connect, onDisconnect = vm::disconnect)
                     TargetConfig(
                         state = state,
                         onTargetType = vm::setTargetType,
@@ -199,40 +198,30 @@ private fun CompactStatus(state: ConnectionState) {
 }
 
 @Composable
-private fun ConnectionStatusCard(state: ConnectionState, onConnect: () -> Unit) {
+private fun ConnectionStatusCard(state: ConnectionState, onConnect: () -> Unit, onDisconnect: () -> Unit) {
     val context = LocalContext.current
 
-    // Ask once to be exempt from battery optimisation, otherwise the OS throttles the BLE scan
-    // over a couple of minutes and the live reading rate collapses.
-    fun ensureBatteryExemption() {
-        val power = context.getSystemService(PowerManager::class.java) ?: return
-        if (!power.isIgnoringBatteryOptimizations(context.packageName)) {
-            runCatching {
-                context.startActivity(
-                    Intent(
-                        Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
-                        Uri.parse("package:${context.packageName}"),
-                    ),
-                )
+    // A denied POST_NOTIFICATIONS only hides the service notification, so it is bundled with the
+    // scan permission rather than gating the connect.
+    val required = remember {
+        buildList {
+            add(Manifest.permission.BLUETOOTH_SCAN)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                add(Manifest.permission.POST_NOTIFICATIONS)
             }
         }
     }
 
-    fun doConnect() {
-        onConnect()
-        ensureBatteryExemption()
-    }
+    fun isGranted(permission: String): Boolean = ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
 
+    // The result map has no BLUETOOTH_SCAN entry when only POST_NOTIFICATIONS was missing.
     val permissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission(),
-    ) { granted -> if (granted) doConnect() }
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) { if (isGranted(Manifest.permission.BLUETOOTH_SCAN)) onConnect() }
 
     fun requestConnect() {
-        val granted = ContextCompat.checkSelfPermission(
-            context,
-            Manifest.permission.BLUETOOTH_SCAN,
-        ) == PackageManager.PERMISSION_GRANTED
-        if (granted) doConnect() else permissionLauncher.launch(Manifest.permission.BLUETOOTH_SCAN)
+        val missing = required.filterNot(::isGranted)
+        if (missing.isEmpty()) onConnect() else permissionLauncher.launch(missing.toTypedArray())
     }
 
     Card(modifier = Modifier.fillMaxWidth()) {
@@ -263,7 +252,10 @@ private fun ConnectionStatusCard(state: ConnectionState, onConnect: () -> Unit) 
                         )
                     }) { Text(stringResource(R.string.enable_bluetooth)) }
 
-                is ConnectionState.Connected, is ConnectionState.Searching -> Unit
+                // Nothing stops the scan on disposal, so offer an explicit disconnect.
+                is ConnectionState.Connected, is ConnectionState.Searching ->
+                    OutlinedButton(onClick = onDisconnect) { Text(stringResource(R.string.disconnect)) }
+
                 else -> Button(onClick = ::requestConnect) { Text(stringResource(R.string.connect_scale)) }
             }
         }
