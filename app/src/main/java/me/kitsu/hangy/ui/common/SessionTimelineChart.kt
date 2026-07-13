@@ -18,6 +18,9 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.inset
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.TextMeasurer
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.rememberTextMeasurer
 import me.kitsu.hangy.R
 import me.kitsu.hangy.domain.engine.TimedSample
@@ -27,12 +30,16 @@ import me.kitsu.hangy.domain.model.SessionDetail
 import kotlin.math.max
 
 /**
- * Plots a whole session's raw weight stream on a [Canvas], with the target band drawn horizontally
- * and each rep's tension window shaded vertically. The stream is min/max-decimated to the visible
- * width so a multi-thousand-point session renders cheaply.
+ * Plots a session's weight stream on a [Canvas] with the target band drawn horizontally. Rest
+ * periods are cut out: each rep's tension window is laid onto a collapsed time axis (width
+ * proportional to its duration, small gap between reps), alternate reps get a zebra background
+ * band, and the bottom axis labels rep numbers instead of time. Sessions recorded before per-rep
+ * windows existed fall back to the full raw timeline with tension windows shaded vertically.
  *
- * When [interactive] is true the time axis can be pinch-zoomed and dragged; otherwise the whole
- * session is shown statically (used for the mini overviews in cards and the post-session summary).
+ * The stream is min/max-decimated to the visible width so a multi-thousand-point session renders
+ * cheaply. When [interactive] is true the x-axis can be pinch-zoomed and dragged; otherwise the
+ * whole session is shown statically (used for the mini overviews in cards and the post-session
+ * summary).
  */
 @Composable
 fun SessionTimelineChart(detail: SessionDetail, modifier: Modifier = Modifier, interactive: Boolean = false, showAxes: Boolean = true) {
@@ -45,9 +52,10 @@ fun SessionTimelineChart(detail: SessionDetail, modifier: Modifier = Modifier, i
     val kgUnit = stringResource(R.string.target_unit_kg)
     val measurer = rememberTextMeasurer()
 
-    val samples = detail.samples
-    val firstT = samples.firstOrNull()?.tOffsetMs ?: 0L
-    val lastT = samples.lastOrNull()?.tOffsetMs ?: 0L
+    val collapsed = remember(detail) { collapseRests(detail) }
+    val samples = collapsed?.samples ?: detail.samples
+    val firstT = if (collapsed != null) 0L else samples.firstOrNull()?.tOffsetMs ?: 0L
+    val lastT = collapsed?.spanMs ?: (samples.lastOrNull()?.tOffsetMs ?: 0L)
     val totalSpan = (lastT - firstT).coerceAtLeast(1L).toFloat()
 
     var scale by remember(detail.session.id) { mutableFloatStateOf(1f) }
@@ -65,7 +73,6 @@ fun SessionTimelineChart(detail: SessionDetail, modifier: Modifier = Modifier, i
 
     val bandLow = detail.session.targetLowKg
     val bandHigh = detail.session.targetHighKg
-    val reps = detail.reps
 
     val gestureModifier = if (interactive && totalSpan > 1f) {
         Modifier.pointerInput(detail.session.id) {
@@ -104,15 +111,25 @@ fun SessionTimelineChart(detail: SessionDetail, modifier: Modifier = Modifier, i
         val bottomGutter = if (showAxes) X_AXIS_GUTTER.toPx() else 0f
         if (showAxes) {
             drawWeightAxis(measurer, labelStyle, gridColor, labelColor, kgUnit, bottom, top, leftGutter, bottomGutter)
-            drawTimeAxis(measurer, labelStyle, gridColor, labelColor, windowStart, windowEnd, leftGutter, bottomGutter)
+            if (collapsed != null) {
+                drawRepAxis(measurer, labelStyle, labelColor, collapsed.segments, windowStart, windowEnd, leftGutter, bottomGutter)
+            } else {
+                drawTimeAxis(measurer, labelStyle, gridColor, labelColor, windowStart, windowEnd, leftGutter, bottomGutter)
+            }
         } else {
             drawGridLines(gridColor)
         }
         inset(left = leftGutter, top = 0f, right = 0f, bottom = bottomGutter) {
             drawHorizontalBand(bandLow, bandHigh, bottom, range, bandColor)
-            drawTensionSpans(reps, windowStart, visibleSpan, tensionColor)
-            drawZeroBaseline(bottom, range, gridColor)
-            drawTrace(linePath, points, windowStart, visibleSpan, bottom, range, lineColor)
+            if (collapsed != null) {
+                drawRepBands(collapsed.segments, windowStart, visibleSpan, tensionColor)
+                drawZeroBaseline(bottom, range, gridColor)
+                drawSegmentedTrace(linePath, points, collapsed.segments, windowStart, visibleSpan, bottom, range, lineColor)
+            } else {
+                drawTensionSpans(detail.reps, windowStart, visibleSpan, tensionColor)
+                drawZeroBaseline(bottom, range, gridColor)
+                drawTrace(linePath, points, windowStart, visibleSpan, bottom, range, lineColor)
+            }
         }
     }
 }
@@ -125,6 +142,44 @@ private const val TENSION_ALPHA = 0.18f
 private const val MAX_ZOOM = 40f
 private const val MINI_BUCKETS = 120
 private const val INTERACTIVE_BUCKETS = 260
+private const val REP_GAP_FRACTION = 0.02
+private const val LABEL_GAP_PX = 4f
+
+/** A rep's slice of the collapsed time axis, `[startMs, endMs]` in collapsed time. */
+internal data class RepSegment(val repIndex: Int, val startMs: Long, val endMs: Long)
+
+/** A session re-based onto a rest-free time axis: remapped samples, one segment per rep. */
+internal data class CollapsedTimeline(val samples: List<Sample>, val segments: List<RepSegment>, val spanMs: Long)
+
+/**
+ * Cuts the rest periods out of [detail]: reps with a recorded tension window are laid end to end
+ * (in tension order, widths proportional to duration) with a small gap between them, and each
+ * rep's samples are shifted onto that axis. Returns null when no rep has a window, so the caller
+ * can fall back to the raw timeline.
+ */
+internal fun collapseRests(detail: SessionDetail): CollapsedTimeline? {
+    val reps = detail.reps.filter { it.tEndMs > it.tStartMs }.sortedBy { it.tStartMs }
+    if (reps.isEmpty()) return null
+
+    val tensionMs = reps.sumOf { it.tEndMs - it.tStartMs }
+    val gapMs = (tensionMs * REP_GAP_FRACTION).toLong().coerceAtLeast(1L)
+
+    val samples = ArrayList<Sample>()
+    val segments = ArrayList<RepSegment>(reps.size)
+    val all = detail.samples
+    var cursor = 0L
+    var i = 0
+    for (rep in reps) {
+        while (i < all.size && all[i].tOffsetMs < rep.tStartMs) i++
+        while (i < all.size && all[i].tOffsetMs <= rep.tEndMs) {
+            samples.add(all[i].copy(tOffsetMs = cursor + (all[i].tOffsetMs - rep.tStartMs)))
+            i++
+        }
+        segments.add(RepSegment(rep.repIndex, cursor, cursor + (rep.tEndMs - rep.tStartMs)))
+        cursor = segments.last().endMs + gapMs
+    }
+    return CollapsedTimeline(samples, segments, segments.last().endMs)
+}
 
 /**
  * Per-bucket min/max decimation of [samples] within `[startMs, endMs]`. Emitting both the min and
@@ -205,6 +260,72 @@ private fun DrawScope.drawTensionSpans(reps: List<RepResult>, startMs: Long, vis
     }
 }
 
+/** Zebra shading: every other rep segment gets a full-height band so reps read as distinct. */
+private fun DrawScope.drawRepBands(segments: List<RepSegment>, startMs: Long, visibleSpan: Float, color: Color) {
+    segments.forEachIndexed { index, seg ->
+        if (index % 2 == 0) {
+            val x1 = xFor(seg.startMs, startMs, visibleSpan)
+            val x2 = xFor(seg.endMs, startMs, visibleSpan)
+            val w = x2 - x1
+            if (w > 0f) drawRect(color, topLeft = Offset(x1, 0f), size = Size(w, size.height))
+        }
+    }
+}
+
+/** Labels each visible rep segment with its rep number, centred in the bottom gutter. */
+@Suppress("LongParameterList")
+private fun DrawScope.drawRepAxis(
+    measurer: TextMeasurer,
+    style: TextStyle,
+    labelColor: Color,
+    segments: List<RepSegment>,
+    startMs: Long,
+    endMs: Long,
+    leftGutterPx: Float,
+    bottomGutterPx: Float,
+) {
+    val plotWidth = size.width - leftGutterPx
+    val plotHeight = size.height - bottomGutterPx
+    val span = (endMs - startMs).coerceAtLeast(1L).toFloat()
+    var lastLabelEnd = Float.NEGATIVE_INFINITY
+    for (seg in segments) {
+        val visStart = max(seg.startMs, startMs)
+        val visEnd = minOf(seg.endMs, endMs)
+        if (visEnd <= visStart) continue
+        val x1 = leftGutterPx + plotWidth * (visStart - startMs) / span
+        val x2 = leftGutterPx + plotWidth * (visEnd - startMs) / span
+        val layout = measurer.measure(seg.repIndex.toString(), style)
+        val tx = ((x1 + x2 - layout.size.width) / 2f).coerceIn(leftGutterPx, size.width - layout.size.width)
+        if (tx >= lastLabelEnd + LABEL_GAP_PX) {
+            val ty = plotHeight + (bottomGutterPx - layout.size.height) / 2f
+            drawText(layout, color = labelColor, topLeft = Offset(tx, ty))
+            lastLabelEnd = tx + layout.size.width
+        }
+    }
+}
+
+/** Draws the trace one rep segment at a time so the line never bridges the inter-rep gaps. */
+@Suppress("LongParameterList")
+private fun DrawScope.drawSegmentedTrace(
+    path: Path,
+    points: List<TimedSample>,
+    segments: List<RepSegment>,
+    startMs: Long,
+    visibleSpan: Float,
+    bottom: Double,
+    range: Double,
+    color: Color,
+) {
+    var i = 0
+    for (seg in segments) {
+        while (i < points.size && points[i].tMs < seg.startMs) i++
+        val from = i
+        while (i < points.size && points[i].tMs <= seg.endMs) i++
+        drawTrace(path, points.subList(from, i), startMs, visibleSpan, bottom, range, color)
+    }
+}
+
+@Suppress("LongParameterList")
 private fun DrawScope.drawTrace(
     path: Path,
     points: List<TimedSample>,
